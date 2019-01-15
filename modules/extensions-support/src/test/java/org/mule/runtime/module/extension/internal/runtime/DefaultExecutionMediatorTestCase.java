@@ -24,6 +24,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mule.functional.junit4.matchers.ThrowableRootCauseMatcher.hasRootCause;
 import static org.mule.runtime.core.api.lifecycle.LifecycleUtils.initialiseIfNeeded;
 import static org.mule.runtime.core.internal.util.rx.ImmediateScheduler.IMMEDIATE_SCHEDULER;
 import static org.mule.test.module.extension.internal.util.ExtensionsTestUtils.mockExceptionEnricher;
@@ -57,6 +58,7 @@ import org.mule.runtime.module.extension.internal.runtime.operation.ExecutionMed
 import org.mule.tck.junit4.AbstractMuleContextTestCase;
 import org.mule.tck.size.SmallTest;
 import org.mule.test.heisenberg.extension.exception.HeisenbergException;
+import org.mule.test.heisenberg.extension.exception.NullExceptionEnricher;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -129,8 +131,8 @@ public class DefaultExecutionMediatorTestCase extends AbstractMuleContextTestCas
 
   @Mock
   private ConnectionManagerAdapter connectionManagerAdapter;
-  private ConnectionException connectionException = new ConnectionException("Connection failure");
-  private Exception exception = new Exception();
+  private final ConnectionException connectionException = new ConnectionException("Connection failure");
+  private final Exception exception = new Exception();
   private InOrder inOrder;
   private List<Interceptor> orderedInterceptors;
   private ExecutionMediator mediator;
@@ -164,7 +166,14 @@ public class DefaultExecutionMediatorTestCase extends AbstractMuleContextTestCas
     Optional<ConnectionProvider> connectionProvider = Optional.of(connectionProviderWrapper);
 
     when(configurationInstance.getConnectionProvider()).thenReturn(connectionProvider);
-    when(exceptionEnricher.enrichException(exception)).thenReturn(new HeisenbergException(ERROR));
+    when(exceptionEnricher.enrichException(any())).thenAnswer(inv -> {
+      final Throwable toEnrich = inv.getArgumentAt(0, Throwable.class);
+      if (toEnrich == exception || toEnrich.getCause() == exception) {
+        return new HeisenbergException(ERROR, toEnrich);
+      } else {
+        return toEnrich;
+      }
+    });
 
     setInterceptors((Interceptable) configurationInstance, configurationInterceptor1, configurationInterceptor2);
     setInterceptors((Interceptable) operationExecutor, operationInterceptor1, operationInterceptor2);
@@ -246,10 +255,22 @@ public class DefaultExecutionMediatorTestCase extends AbstractMuleContextTestCas
 
   @Test
   public void enrichThrownException() throws Throwable {
+    expectedException.expect(hasRootCause(sameInstance(exception)));
     expectedException.expectCause(instanceOf(HeisenbergException.class));
     expectedException.expectMessage(ERROR);
     mockExceptionEnricher(operationModel, () -> exceptionEnricher);
-    when(operationExecutor.execute(any())).thenReturn(Mono.error(new Exception()));
+    when(operationExecutor.execute(any())).thenReturn(Mono.error(exception));
+    Mono.from(new DefaultExecutionMediator(extensionModel, operationModel, new DefaultConnectionManager(muleContext),
+                                           muleContext.getErrorTypeRepository())
+                                               .execute(operationExceptionExecutor, operationContext))
+        .block();
+  }
+
+  @Test
+  public void notEnrichThrownException() throws Throwable {
+    expectedException.expectCause(sameInstance(exception));
+    mockExceptionEnricher(operationModel, () -> new NullExceptionEnricher());
+    when(operationExecutor.execute(any())).thenReturn(Mono.error(exception));
     Mono.from(new DefaultExecutionMediator(extensionModel, operationModel, new DefaultConnectionManager(muleContext),
                                            muleContext.getErrorTypeRepository())
                                                .execute(operationExceptionExecutor, operationContext))
